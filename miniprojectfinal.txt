@@ -1,0 +1,289 @@
+1. Clone & Setup Application
+git clone https://github.com/Vennilavan12/Brain-Tasks-App.git
+cd Brain-Tasks-App
+Dockerfile:
+
+FROM nginx:stable-alpine
+COPY . /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx","-g","daemon off;"]
+
+3.nginx.conf
+worker_processes 1;
+
+events { worker_connections 1024; }
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    sendfile        on;
+
+    server {
+        listen       3000;
+        server_name  localhost;
+
+        location / {
+            root   /usr/share/nginx/html;
+            index  index.html index.htm;
+        }
+    }
+}
+
+Test locally:
+docker build -t brain-tasks:local .
+docker run --rm -p 8080:3000 brain-tasks:local
+curl http://localhost:8080
+
+4.configure the aws cli:
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+
+aws --version
+aws configure
+give the creditinal:
+
+5.kubectl — install / check / uninstall
+
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+kubectl version --client
+
+Check / verify:
+
+kubectl version --client
+kubectl cluster-info          
+kubectl get nodes
+
+6.eksctl — install / check 
+
+curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+sudo mv /tmp/eksctl /usr/local/bin
+eksctl version
+
+7.docker:
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
+  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+Verify (check):
+
+docker --version
+
+sudo docker run --rm hello-world
+sudo systemctl status docker
+
+8. Push Image to ECR
+
+aws ecr create-repository --repository-name brain-tasks --region us-east-1
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=us-east-1
+REPO_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/brain-tasks
+
+aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $REPO_URI
+
+docker tag brain-tasks:local $REPO_URI:latest
+docker push $REPO_URI:latest
+
+9.Create EKS Cluster
+
+eksctl create cluster \
+  --name brain-tasks-cluster \
+  --region us-east-1 \
+  --nodegroup-name workers \
+  --node-type t3.medium \
+  --nodes 2 \
+  --nodes-min 1 \
+  --nodes-max 3 \
+  --managed
+Update kubeconfig
+aws eks update-kubeconfig --region us-east-1 --name brain-tasks-cluster
+kubectl get nodes
+
+10.Kubernetes Manifests
+deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: brain-tasks-deployment
+  labels:
+    app: brain-tasks
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: brain-tasks
+  template:
+    metadata:
+      labels:
+        app: brain-tasks
+    spec:
+      containers:
+        - name: brain-tasks
+          image: 039612884251.dkr.ecr.us-east-1.amazonaws.com/brain-tasks:latest
+          ports:
+            - containerPort: 3000
+
+service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: brain-tasks-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: brain-tasks
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+
+11.Deploy:
+kubectl apply -f deployment.yaml
+kubectl apply -f service.yaml
+kubectl get svc brain-tasks-service
+
+verify:LoadBalancer URL → app will be accessible
+
+12.CodeBuild Setup
+IAM Role for CodeBuild
+
+aws iam create-role --role-name CodeBuildEKSRole \
+  --assume-role-policy-document file://<(echo '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Service": "codebuild.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }]
+  }')
+
+aws iam attach-role-policy --role-name CodeBuildEKSRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
+aws iam attach-role-policy --role-name CodeBuildEKSRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+aws iam attach-role-policy --role-name CodeBuildEKSRole \
+  --policy-arn arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+aws iam attach-role-policy --role-name CodeBuildEKSRole \
+  --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+13.buildspec.yml
+version: 0.2
+
+env:
+  variables:
+    ACCOUNT_ID: "039612884251"
+    REGION: "us-east-1"
+    ECR_REPO: "brain-tasks"
+    IMAGE_TAG: "latest"
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - export REPOSITORY_URI=$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$ECR_REPO
+      - aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $REPOSITORY_URI
+  build:
+    commands:
+      - echo Building Docker image...
+      - docker build -t $ECR_REPO .
+      - docker tag $ECR_REPO:$IMAGE_TAG $REPOSITORY_URI:$IMAGE_TAG
+  post_build:
+    commands:
+      - echo Pushing Docker image...
+      - docker push $REPOSITORY_URI:$IMAGE_TAG
+      - echo Updating Kubernetes Deployment...
+      - aws eks update-kubeconfig --name brain-tasks-cluster --region $REGION
+      - kubectl set image deployment/brain-tasks-deployment brain-tasks=$REPOSITORY_URI:$IMAGE_TAG
+
+14.CodeDeploy for EKS
+
+i.Create CodeDeploy Application:
+aws deploy create-application \
+  --application-name brain-tasks-app \                                  arn:aws:iam::039612884251:role/CodeDeployServiceRole
+  --compute-platform EC2/Onpremises
+
+ii.Create Deployment Group
+aws deploy create-deployment-group \
+  --application-name brain-tasks-app \
+  --deployment-group-name brain-tasks-group \
+  --service-role-arn arn:aws:iam::039612884251:role/CodeDeployServiceRole \
+  --deployment-config-name CodeDeployDefault.EKSCanary10Percent5Minutes \
+  --eks-services clusterName=brain-tasks-cluster,serviceName=brain-tasks-service,namespace=default
+iii.appspec.yml
+version: 0.0
+resources:
+  - myApp:
+      type: AWS::EKS::Application
+      properties:
+        clusterName: brain-tasks-cluster
+        namespace: default
+        deploymentFiles:
+          - deployment.yaml
+          - service.yaml
+iv.Run Deployment
+aws deploy create-deployment \
+  --application-name brain-tasks-app \
+  --deployment-group-name brain-tasks-group \
+  --revision revisionType=AppSpecContent,appSpecContent={content="$(cat appspec.yml)"}
+v.Check Deployment Status
+aws deploy list-deployments \
+  --application-name brain-tasks-app \
+  --deployment-group-name brain-tasks-group
+
+15.CodePipeline for EKS Deployment:
+IAM Role for CodePipeline with permissions for:
+
+GitHub (source)
+
+CodeBuild
+
+CodeDeploy
+
+ECR, EKS
+
+Go to AWS Console → CodePipeline → Create pipeline
+Pipeline name: brain-tasks-pipeline
+Service role: Choose New service role (unless you already created one).
+
+Step 1: Source stage
+
+Provider: GitHub (Version 2)
+
+Connect GitHub (OAuth or PAT token)
+
+Select repo: aravinthhub7/brainstack (your repo)
+
+Branch: master
+
+Step 2: Build stage
+
+Provider: AWS CodeBuild
+
+Project: select your existing CodeBuild project
+Step 3: Deploy stage
+Provider: AWS CodeDeploy
+
+Application name: brain-tasks-app
+
+Deployment group: brain-tasks-group
+Step 4: Review and create
+
+Review all stages
+
+Click Create pipeline
+ Pipeline will immediately run.
+
+16.Monitoring
+
+CloudWatch Logs → enabled for CodeBuild & CodeDeploy logs
+
+kubectl logs -f podname → app logs in EKS
