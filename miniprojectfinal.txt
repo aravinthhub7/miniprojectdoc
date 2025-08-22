@@ -184,6 +184,9 @@ env:
     REGION: "us-east-1"
     ECR_REPO: "brain-tasks"
     IMAGE_TAG: "latest"
+    CLUSTER_NAME: "brain-tasks-cluster"
+    DEPLOYMENT_NAME: "brain-tasks-deployment"
+    CONTAINER_NAME: "brain-tasks"
 
 phases:
   pre_build:
@@ -198,11 +201,11 @@ phases:
       - docker tag $ECR_REPO:$IMAGE_TAG $REPOSITORY_URI:$IMAGE_TAG
   post_build:
     commands:
-      - echo Pushing Docker image...
+      - echo Pushing Docker image to ECR...
       - docker push $REPOSITORY_URI:$IMAGE_TAG
-      - echo Updating Kubernetes Deployment...
-      - aws eks update-kubeconfig --name brain-tasks-cluster --region $REGION
-      - kubectl set image deployment/brain-tasks-deployment brain-tasks=$REPOSITORY_URI:$IMAGE_TAG
+      - echo Updating Kubernetes deployment...
+      - aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+      - kubectl set image deployment/$DEPLOYMENT_NAME $CONTAINER_NAME=$REPOSITORY_URI:$IMAGE_TAG
 
 14.CodeDeploy for EKS
 
@@ -287,3 +290,4 @@ Click Create pipeline
 CloudWatch Logs → enabled for CodeBuild & CodeDeploy logs
 
 kubectl logs -f podname → app logs in EKS
+
